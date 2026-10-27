@@ -56,7 +56,7 @@ def main():
     if args.action == 'status':
         subprocess.run(['launchctl','print',domain+'/'+LABEL] if mac else ['systemctl','--user','status','forest.service'], check=False); return
     if args.action == 'remove':
-        subprocess.run(['launchctl','bootout',domain,str(installed)] if mac else ['systemctl','--user','disable','--now','forest.service'],check=False)
+        subprocess.run(['launchctl','bootout',domain,str(installed)] if mac else ['systemctl','--user','disable','--now','forest.service'],check=True)
         installed.unlink(missing_ok=True); return
     generated = render(args.port, headless=args.headless, data_dir=args.data_dir)
     probe=['launchctl','print',domain+'/'+LABEL] if mac else ['systemctl','--user','is-active','--quiet','forest.service']

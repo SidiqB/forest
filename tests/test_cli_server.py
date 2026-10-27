@@ -296,3 +296,43 @@ def test_service_status_remove_do_not_render_or_create_files(monkeypatch, tmp_pa
     monkeypatch.setattr(service.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0))
     service.main()
     assert not (tmp_path / "var").exists() and not (tmp_path / "data").exists()
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_service_remove_preserves_unit_until_manager_succeeds(monkeypatch, tmp_path, system, exit_code):
+    monkeypatch.setattr(service, "ROOT", tmp_path)
+    monkeypatch.setattr(service.platform, "system", lambda: system)
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(sys, "argv", ["service.py", "remove"])
+    relative = "Library/LaunchAgents/org.forest.research.plist" if system == "Darwin" else ".config/systemd/user/forest.service"
+    installed = home / relative
+    installed.parent.mkdir(parents=True)
+    original = b"installed service configuration\n"
+    installed.write_bytes(original)
+    expected = (
+        ["launchctl", "bootout", "gui/" + str(os.getuid()), str(installed)]
+        if system == "Darwin"
+        else ["systemctl", "--user", "disable", "--now", "forest.service"]
+    )
+    real_run = subprocess.run
+    calls = []
+
+    def manager(command, **kwargs):
+        calls.append(command)
+        assert command == expected
+        assert installed.read_bytes() == original
+        # Exercise real subprocess exit handling without touching a user service.
+        return real_run([sys.executable, "-c", f"raise SystemExit({exit_code})"], **kwargs)
+
+    monkeypatch.setattr(service.subprocess, "run", manager)
+    if exit_code:
+        with pytest.raises(subprocess.CalledProcessError) as error:
+            service.main()
+        assert error.value.returncode == exit_code
+        assert installed.read_bytes() == original
+    else:
+        service.main()
+        assert not installed.exists()
+    assert calls == [expected]
