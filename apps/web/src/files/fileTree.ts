@@ -4,13 +4,17 @@ export type FileTreeEntry = {
 };
 
 export function orderFileTreeEntries<T extends FileTreeEntry>(files: T[]): T[] {
+  const directories = new Set(
+    files.filter((file) => file.is_dir).map((file) => file.path),
+  );
   const children = new Map<string, T[]>();
   for (const file of files) {
     const separator = file.path.lastIndexOf("/");
     const parent = separator < 0 ? "" : file.path.slice(0, separator);
-    const siblings = children.get(parent) ?? [];
+    const pageParent = parent && directories.has(parent) ? parent : "";
+    const siblings = children.get(pageParent) ?? [];
     siblings.push(file);
-    children.set(parent, siblings);
+    children.set(pageParent, siblings);
   }
 
   for (const siblings of children.values())
@@ -40,6 +44,9 @@ export function visibleFileTreeEntries<T extends FileTreeEntry>(
   collapsedDirectories: Set<string>,
 ): T[] {
   const normalizedFilter = filter.toLowerCase();
+  const directories = new Set(
+    files.filter((file) => file.is_dir).map((file) => file.path),
+  );
   const matchingPaths = new Set<string>();
   const directoriesWithMatches = new Set<string>();
 
@@ -49,7 +56,7 @@ export function visibleFileTreeEntries<T extends FileTreeEntry>(
     let separator = file.path.lastIndexOf("/");
     while (separator >= 0) {
       const parent = file.path.slice(0, separator);
-      directoriesWithMatches.add(parent);
+      if (directories.has(parent)) directoriesWithMatches.add(parent);
       separator = file.path.lastIndexOf("/", separator - 1);
     }
   }
@@ -63,7 +70,8 @@ export function visibleFileTreeEntries<T extends FileTreeEntry>(
     let separator = file.path.lastIndexOf("/");
     while (separator >= 0) {
       const parent = file.path.slice(0, separator);
-      if (collapsedDirectories.has(parent)) return false;
+      if (directories.has(parent) && collapsedDirectories.has(parent))
+        return false;
       separator = file.path.lastIndexOf("/", separator - 1);
     }
     return true;

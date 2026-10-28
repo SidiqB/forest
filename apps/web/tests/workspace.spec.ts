@@ -812,6 +812,61 @@ test("Files page navigates bounded file-list pages", async ({ page }) => {
   await expect(tree.locator(".file-tree-pagination")).toContainText("Page 2");
 });
 
+test("Files page opens entries whose parent is on a previous page", async ({
+  page,
+  request,
+}) => {
+  const firstCursor = JSON.stringify({ is_dir: true, path: "records" });
+  const firstPage = {
+    files: [{ path: "records", size: 0, modified: 0, is_dir: true }],
+    has_more: true,
+    next_cursor: firstCursor,
+  };
+  const secondPage = {
+    files: [
+      { path: "records/notes.md", size: 16, modified: 0, is_dir: false },
+      { path: "records/summary.md", size: 18, modified: 0, is_dir: false },
+    ],
+    has_more: false,
+    next_cursor: null,
+  };
+  const saved = await request.put(`/api/projects/${projectId}/file`, {
+    data: { path: "records/notes.md", content: "Later page content\n" },
+  });
+  expect(saved.ok()).toBeTruthy();
+
+  await page.route(`**/api/projects/${projectId}/files*`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== `/api/projects/${projectId}/files`)
+      return route.continue();
+    await route.fulfill({
+      json: url.searchParams.has("cursor") ? secondPage : firstPage,
+    });
+  });
+
+  await page.goto(`/projects/${projectId}/files`);
+  const tree = page.locator(".file-tree");
+  const records = tree.getByRole("button", { name: "records", exact: true });
+  await expect(records).toBeVisible();
+  await records.click();
+  await expect(records).toHaveAttribute("aria-expanded", "false");
+  await tree
+    .locator(".file-tree-pagination")
+    .getByRole("button", { name: "Next", exact: true })
+    .click();
+
+  await expect(
+    tree.getByRole("button", { name: "records/notes.md" }),
+  ).toBeVisible();
+  await expect(
+    tree.getByRole("button", { name: "records/summary.md" }),
+  ).toBeVisible();
+  await tree.getByRole("button", { name: "records/notes.md" }).click();
+  await expect(page.locator(".monaco-editor")).toContainText(
+    "Later page content",
+  );
+});
+
 test("Files page discards an in-flight page after switching projects", async ({
   page,
   request,
