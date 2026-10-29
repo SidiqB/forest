@@ -433,6 +433,71 @@ def test_paired_expected_numerical_result_cannot_be_fabricated(workspaces):
     assert next(receipt for receipt in result['checks'][0]['comparisons'] if receipt['field'] == 'unit_count')['recomputed'] == 3
 
 
+@pytest.mark.parametrize('label,record,expected_key', [
+    ('conflicting selected metric', '{"baseline_mean":999,"baseline_mean":8,"candidate_mean":5.666666666666667,"improvement":2.3333333333333335,"unit_count":3,"observation_count":4}', 'baseline_mean'),
+    ('equal selected metric', '{"baseline_mean":8,"baseline_mean":8,"candidate_mean":5.666666666666667,"improvement":2.3333333333333335,"unit_count":3,"observation_count":4}', 'baseline_mean'),
+    ('escaped equivalent selected metric', '{"\\u0062aseline_mean":8,"baseline_mean":8,"candidate_mean":5.666666666666667,"improvement":2.3333333333333335,"unit_count":3,"observation_count":4}', 'baseline_mean'),
+    ('nested unselected metric', '{"baseline_mean":8,"candidate_mean":5.666666666666667,"improvement":2.3333333333333335,"unit_count":3,"observation_count":4,"metadata":{"label":"first","label":"second"}}', 'label'),
+])
+def test_paired_recompute_rejects_ambiguous_result_keys_without_changing_files(workspaces, label, record, expected_key):
+    producer, verifier = workspaces
+    paired_files(producer)
+    (producer / 'metrics.json').write_text(record)
+    before = {path: path.read_bytes() for path in (producer / 'paired.csv', producer / 'metrics.json')}
+
+    result = check_contract(contract(paired_check()), producer, verifier)
+
+    assert result['verification_status'] == 'rejected', label
+    assert result['checks'][0]['status'] == 'rejected'
+    assert expected_key in result['checks'][0]['reason']
+    assert 'paired recomputation' in result['checks'][0]['verification_scope'].lower()
+    assert {path: path.read_bytes() for path in before} == before
+
+
+def test_paired_recompute_rejects_ambiguous_nested_selected_result_key(workspaces):
+    producer, verifier = workspaces
+    paired_files(producer)
+    fields = {field: '/summary/' + field for field in
+              ['baseline_mean', 'candidate_mean', 'improvement', 'unit_count', 'observation_count']}
+    (producer / 'metrics.json').write_text(
+        '{"summary":{"baseline_mean":8,"baseline_mean":8,"candidate_mean":5.666666666666667,'
+        '"improvement":2.3333333333333335,"unit_count":3,"observation_count":4}}')
+
+    result = check_contract(contract(paired_check(fields=fields)), producer, verifier)
+
+    assert result['verification_status'] == 'rejected'
+    assert result['checks'][0]['status'] == 'rejected'
+    assert 'baseline_mean' in result['checks'][0]['reason']
+
+
+def test_paired_recompute_malformed_results_json_remains_inconclusive(workspaces):
+    producer, verifier = workspaces
+    paired_files(producer)
+    (producer / 'metrics.json').write_text('{malformed')
+
+    result = check_contract(contract(paired_check()), producer, verifier)
+
+    assert result['verification_status'] == 'inconclusive'
+    assert result['checks'][0]['status'] == 'inconclusive'
+
+
+def test_paired_duplicate_result_rejection_preserves_neighboring_check_results(workspaces):
+    producer, verifier = workspaces
+    write_json(producer / 'neighbor.json', {'score': 4})
+    write_json(verifier / 'neighbor.json', {'score': 4})
+    paired_files(producer)
+    (producer / 'metrics.json').write_text(
+        '{"baseline_mean":999,"baseline_mean":8,"candidate_mean":5.666666666666667,'
+        '"improvement":2.3333333333333335,"unit_count":3,"observation_count":4}')
+
+    result = check_contract(contract(numeric(source='neighbor.json', repeat='neighbor.json'), paired_check()), producer, verifier)
+
+    assert result['verification_status'] == 'rejected'
+    assert [check['status'] for check in result['checks']] == ['accepted', 'rejected']
+    assert result['checks'][0]['kind'] == 'numeric_compare'
+    assert 'Duplicate JSON object key' in result['checks'][1]['reason']
+
+
 def test_paired_ci_uses_explicit_actual_cluster_bootstrap(workspaces):
     producer, verifier = workspaces
     actual = paired_files(producer)

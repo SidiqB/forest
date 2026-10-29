@@ -586,7 +586,12 @@ def _paired(check, producer, verifier):
             candidate_column=check['candidate_column'], direction=check['direction'],
             confidence=sampling['confidence'], bootstrap_samples=sampling['bootstrap_samples'], seed=sampling['seed'])
         measured.update({key: computed[key] for key in ('ci_low', 'ci_high', 'confidence')})
-    expected = json.loads(results_file.read_text())
+    try:
+        expected = json.loads(results_file.read_text(), object_pairs_hook=_reject_duplicate_json_keys)
+    except _DuplicateJSONKey as exc:
+        return {'status': 'rejected', 'source': check['source'], 'results': check['results'],
+                'reason': str(exc),
+                'verification_scope': 'Paired recomputation result objects must not contain duplicate keys after JSON escape decoding'}
     receipts = []
     for field, pointer in check['fields'].items():
         try:
