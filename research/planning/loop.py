@@ -1,5 +1,7 @@
 """Real model proposals, checked against the current editable graph before adoption."""
 import json
+import math
+import re
 from copy import deepcopy
 from pathlib import Path
 from sqlalchemy import select
@@ -385,13 +387,83 @@ def validate_replanning(plan,before,after,runs,control,health,goal):
                   'Submission Reviewer','Layout Reviewer','Visual Selector','Figure Designer'}
     def scientific(node):
         from research.agents.research_path import task_signature
-        return task_signature(node)
+        signature=task_signature(node)
+        # Execution time is an operational budget, not a scientific route
+        # change. Keep the shared task identity unchanged for recovery and
+        # completion checks, while excluding timeout-only edits from this
+        # replanning gate.
+        config=signature.get('config')
+        if isinstance(config,dict):
+            config.pop('timeout',None)
+        return signature
     def productive(node):
         cfg=node.get('config',{})
         return (not node.get('archived') and node.get('branch_id') in active and
                 cfg.get('kind') in ('agent','experiment','command','analysis') and
                 cfg.get('role') not in review_roles)
+    affected={nid for signal in health.get('signals',[]) for nid in signal.get('node_ids',[]) if nid in old and not old[nid].get('archived')}
+    affected.update(nid for nid in control.get('route_replan_node_ids',[]) if nid in old and not old[nid].get('archived'))
+    def finite_positive(value):
+        return (isinstance(value,(int,float)) and not isinstance(value,bool) and
+                math.isfinite(value) and value>0)
+    def same_limit(value,limit):
+        return finite_positive(value) and math.isclose(float(value),float(limit),rel_tol=0,abs_tol=0)
+    def timeout_failure(run,limit):
+        if run.get('status')!='failed': return False
+        config=run.get('config') or {}
+        if not same_limit(config.get('timeout'),limit): return False
+        error=run.get('error')
+        if error=='Configured process timeout exceeded': return True
+        if isinstance(error,str):
+            command=re.fullmatch(r'Command exceeded ([0-9]+(?:\.[0-9]+)?)s; output is available at (.+)',error)
+            budget=re.fullmatch(r'Task exceeded its ([0-9]+(?:\.[0-9]+)?)s budget',error)
+            if command or budget:
+                return same_limit(float((command or budget).group(1)),limit)
+        return False
+    def run_scientific(run,original):
+        from research.agents.research_path import task_signature
+        config=run.get('config') or {}
+        identity=config.get('research_task_identity')
+        if isinstance(identity,dict): signature=deepcopy(identity)
+        else: signature=task_signature({'instructions':config.get('instructions',original.get('instructions','')),
+                                        'config':config,'inputs':config.get('input_references',original.get('inputs',[]))})
+        normalized=signature.get('config')
+        if isinstance(normalized,dict): normalized.pop('timeout',None)
+        return signature
+    def timeout_repair(ident,original,node,evidence):
+        if ident not in old or ident not in affected or not productive(node): return False
+        old_timeout=(original.get('config') or {}).get('timeout')
+        new_timeout=(node.get('config') or {}).get('timeout')
+        if not finite_positive(old_timeout) or not finite_positive(new_timeout) or new_timeout<=old_timeout:
+            return False
+        signals=health.get('signals',[])
+        repeated=[signal for signal in signals if signal.get('kind')=='repeated_failure' and ident in signal.get('node_ids',[])]
+        if not repeated: return False
+        signal_runs={run_id for signal in repeated for run_id in signal.get('run_ids',[])}
+        if not signal_runs or not signal_runs.issubset(actual_runs) or not signal_runs.issubset(set(evidence)):
+            return False
+        for signal in signals:
+            if signal.get('kind')=='repeated_failure': continue
+            competing_nodes=set(signal.get('node_ids',[]))
+            competing_runs=set(signal.get('run_ids',[]))
+            if ident in competing_nodes or signal_runs.intersection(competing_runs):
+                co_generated=(signal.get('kind')=='excessive_counterexample_checks' and competing_runs and
+                              competing_runs.issubset(signal_runs) and
+                              all(timeout_failure(runs_by_id.get(run_id,{}),old_timeout) and
+                                  run_scientific(runs_by_id[run_id],original)==scientific(original)
+                                  for run_id in competing_runs))
+                if not co_generated: return False
+        current_revision=original.get('revision',0)
+        for run_id in signal_runs:
+            run=runs_by_id.get(run_id)
+            if (not run or run.get('node_id')!=ident or run.get('node_revision',0)!=current_revision or
+                    not timeout_failure(run,old_timeout) or
+                    run_scientific(run,original)!=scientific(original)):
+                return False
+        return True
     changed=[]
+    repaired=[]
+    runs_by_id={run['id']:run for run in runs if isinstance(run,dict) and run.get('id')}
     for ident,node in new.items():
         if not productive(node):continue
         description=scientific(node)
@@ -402,21 +474,22 @@ def validate_replanning(plan,before,after,runs,control,health,goal):
                 # Instructions define an editable agent task. Structural route
                 # admission does not pretend to prove its scientific merit.
                 meaningful=True
+            if not meaningful and timeout_repair(ident,old[ident],node,revision.get('evidence_run_ids')):
+                repaired.append(ident)
         else:
             meaningful=bool(description['instructions'] and
                             (description['config'] or node.get('config',{}).get('kind')=='agent') and
                             all(description!=scientific(existing) for existing in old.values()))
         if meaningful:changed.append(ident)
-    if not changed:raise ValueError('Replanning needs a materially changed scientific task; title/layout edits, duplicate retries and only advice work do not qualify')
-    affected={nid for signal in health.get('signals',[]) for nid in signal.get('node_ids',[]) if nid in old and not old[nid].get('archived')}
-    affected.update(nid for nid in control.get('route_replan_node_ids',[]) if nid in old and not old[nid].get('archived'))
+    if not changed and not repaired:raise ValueError('Replanning needs a materially changed scientific task; title/layout edits, duplicate retries and only advice work do not qualify')
     if affected-set(stopped):
         raise ValueError('Replanning must identify the affected route nodes in stop_node_ids')
     for ident in stopped:
         node=new.get(ident)
-        if node and not node.get('archived') and node.get('branch_id') in active and ident not in changed:
+        if node and not node.get('archived') and node.get('branch_id') in active and ident not in changed and ident not in repaired:
             raise ValueError('Retire or materially repair each stopped node before continuing the route')
     return {**deepcopy(revision),'changed_scientific_node_ids':changed,
+            'repaired_timeout_node_ids':repaired,
             'verification_scope':'Actual references and editable task changes; new scientific direction remains an evidence-grounded proposal'}
 
 def apply_plan(project_id, run_id, plan, expected_revision):
@@ -521,7 +594,10 @@ def apply_plan(project_id, run_id, plan, expected_revision):
             from services.interventions.application import apply_in_session
             applied=apply_in_session(s,p,'plan:'+run_id,expected_revision,commands,actor='planner',batch=True)
             graph=applied['graph']
-        record=Hypothesis(project_id=p.id,title='Research decision',status='adopted' if commands else plan['action'],data={**plan,'origin':'research_controller','run_id':run_id,'graph_revision':p.revision,'evidence_label':'INFERRED'})
+        decision_plan={**plan}
+        if replanned is not None:
+            decision_plan['replanning']=replanned
+        record=Hypothesis(project_id=p.id,title='Research decision',status='adopted' if commands else plan['action'],data={**decision_plan,'origin':'research_controller','run_id':run_id,'graph_revision':p.revision,'evidence_label':'INFERRED'})
         s.add(record); s.flush()
         control={**control,'phase':'EXECUTE' if commands else 'CONFIRM','last_decision_id':record.id,'last_rationale':plan['rationale'], 'last_plan_run':run_id, 'cycles':int(control.get('cycles',0))+1}
         if replanned is not None:
