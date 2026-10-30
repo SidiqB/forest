@@ -210,6 +210,11 @@ export function FilesPage() {
   };
   const [path, setPath] = useState("");
   const [content, setContent] = useState("");
+  const contentRef = useRef(content);
+  const updateContent = (value: string) => {
+    contentRef.current = value;
+    setContent(value);
+  };
   const [original, setOriginal] = useState("");
   const [revision, setRevision] = useState<number | undefined>();
   const [loadedPath, setLoadedPath] = useState("");
@@ -254,7 +259,7 @@ export function FilesPage() {
       typeof draft.content === "string" &&
       draft.content !== draft.original
     ) {
-      setContent(draft.content);
+      updateContent(draft.content);
       setOriginal(
         typeof draft.original === "string" ? draft.original : saved.content,
       );
@@ -265,13 +270,13 @@ export function FilesPage() {
       return;
     }
     sessionStorage.removeItem(key);
-    setContent(saved.content);
+    updateContent(saved.content);
     setOriginal(saved.content);
     setRevision(saved.revision);
     setDirty(false);
   };
   const changeContent = (value: string) => {
-    setContent(value);
+    updateContent(value);
     setDirty(value !== original);
     const key = fileDraftKey(path);
     if (value === original) sessionStorage.removeItem(key);
@@ -315,7 +320,7 @@ export function FilesPage() {
     setDirty(false);
     setLoadedPath("");
     setLoadError("");
-    setContent("");
+    updateContent("");
     setOriginal("");
     setRevision(undefined);
     if (/\.(csv|tsv)$/i.test(p)) {
@@ -342,7 +347,6 @@ export function FilesPage() {
     const targetPath = path;
     const savedContent = content;
     const savedRevision = revision;
-    const savedDraftVersion = draftVersion.current;
     if (
       !targetPath ||
       selection.path !== targetPath ||
@@ -369,9 +373,22 @@ export function FilesPage() {
       }
       setRevision(r.revision);
       setOriginal(savedContent);
-      setDirty(draftVersion.current !== savedDraftVersion);
+      const latestContent = contentRef.current;
+      setDirty(latestContent !== savedContent);
       setConflict(null);
-      sessionStorage.removeItem(fileDraftKey(path));
+      const draftKey = fileDraftKey(targetPath);
+      if (latestContent === savedContent) {
+        sessionStorage.removeItem(draftKey);
+      } else {
+        sessionStorage.setItem(
+          draftKey,
+          JSON.stringify({
+            content: latestContent,
+            original: savedContent,
+            revision: r.revision,
+          }),
+        );
+      }
       await reload();
     } catch (e) {
       if ((e as any).status === 409) {
@@ -728,7 +745,7 @@ export function FilesPage() {
                         }
                         fileSelection.select("");
                         setPath("");
-                        setContent("");
+                        updateContent("");
                         setOriginal("");
                         setRevision(undefined);
                         setLoadedPath("");
