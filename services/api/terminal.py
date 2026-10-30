@@ -33,9 +33,28 @@ class TerminalSession:
         self.clients = set()
         self.last_seen = time.monotonic()
         self.closed = False
+        self.input_lock = asyncio.Lock()
         self.close_complete = asyncio.Event()
         self.close_error = None
         self.reader = asyncio.create_task(self.pump())
+
+    async def write_input(self, text):
+        # Keep a paste intact across short writes and across attached clients.
+        async with self.input_lock:
+            pending = memoryview(text.encode())
+            while pending:
+                if self.closed:
+                    raise OSError('Terminal session closed')
+                try:
+                    written = os.write(self.master, pending[:65536])
+                except BlockingIOError:
+                    # Let the reader and other sessions run while the PTY drains.
+                    await asyncio.sleep(.03)
+                    continue
+                if written == 0:
+                    raise OSError('Terminal input made no progress')
+                pending = pending[written:]
+                await asyncio.sleep(0)
 
     async def publish(self, value):
         if not value or self.closed:
@@ -223,9 +242,12 @@ async def attach(ws, key, cwd):
                 await session.close()
                 break
             elif not session.closed:
-                os.write(session.master, text.encode())
-    except (WebSocketDisconnect, OSError):
+                await session.write_input(text)
+    except WebSocketDisconnect:
         pass
+    except OSError:
+        if not session.closed:
+            await ws.close(code=1011, reason='Terminal input failed')
     finally:
         session.clients.discard(ws)
         session.last_seen = time.monotonic()
